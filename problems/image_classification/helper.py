@@ -112,8 +112,8 @@ def load_kv_if_present() -> Tuple[str | None, str | None]:
 
     Fallbacks
     ---------
-    If base_url is missing, we can fall back to MEDGEMMA_FALLBACK_BASE_URL
-    (defaults to Airi inference endpoint). If api_key is missing, we fall back to
+    If base_url is missing, we can fall back to MEDGEMMA_FALLBACK_BASE_URL.
+    If api_key is missing, we fall back to
     MEDGEMMA_FALLBACK_API_KEY (defaults to "DUMMY"), because many OpenAI-compatible
     servers accept any non-empty key.
     """
