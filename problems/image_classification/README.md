@@ -33,8 +33,8 @@ The quick tests rely mainly on `openai`, `httpx`, `pillow`, `numpy`, `pyyaml`, a
 Preferred local option: write a fresh key to task-local `kv.py`.
 
 ```bash
-cat > problems/med_pneu_v12_27b_r128_iv/kv.py <<'PY'
-base_url = "https://inference.airi.net:46783/v1"
+cat > problems/image_classification/kv.py <<'PY'
+base_url = "https://<your-inference-endpoint>/v1"
 api_key = "PASTE_FRESH_KEY_HERE"
 PY
 ```
@@ -42,14 +42,14 @@ PY
 Alternative via environment variables:
 
 ```bash
-export MEDGEMMA_BASE_URL='https://inference.airi.net:46783/v1'
+export MEDGEMMA_BASE_URL='https://<your-inference-endpoint>/v1'
 export MEDGEMMA_API_KEY='PASTE_FRESH_KEY_HERE'
 ```
 
 OpenAI-compatible names also work:
 
 ```bash
-export OPENAI_BASE_URL='https://inference.airi.net:46783/v1'
+export OPENAI_BASE_URL='https://<your-inference-endpoint>/v1'
 export OPENAI_API_KEY='PASTE_FRESH_KEY_HERE'
 ```
 

@@ -109,8 +109,8 @@ Version 6 notes
     * MEDGEMMA_BASE_URL / MEDGEMMA_API_KEY, or
     * OPENAI_BASE_URL / OPENAI_API_BASE + OPENAI_API_KEY, or
     * kv.py next to this task.
-  If you use Hydra llm=airi_med, still export OPENAI_BASE_URL+OPENAI_API_KEY, because the validator
-  runs in a separate process and may not see Hydra objects.
+  Always export OPENAI_BASE_URL+OPENAI_API_KEY explicitly, because the validator
+  runs in a separate process and may not see Hydra LLM config objects.
 
 - New in v6:
   * Fixed model: Google/Medgemma-1.5-4b-it (not overridable by programs)

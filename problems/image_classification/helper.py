@@ -103,7 +103,7 @@ def load_kv_if_present() -> Tuple[str | None, str | None]:
     Why this exists
     ---------------
     In GigaEvo the validator is executed in a separate process (exec_runner). That
-    process does NOT reliably "see" Hydra objects (e.g. llm=airi_med) and therefore
+    process does NOT reliably "see" Hydra LLM config objects and therefore
     cannot always access your base_url/api_key from config. So we load credentials
     from:
       1) MEDGEMMA_BASE_URL + MEDGEMMA_API_KEY (task-local)
