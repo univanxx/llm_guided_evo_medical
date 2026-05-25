@@ -1,0 +1,186 @@
+TASK DEFINITION – DIAGNOSTIC TELEMEDICINE CONSULTATION
+ 
+Challenge: Given an incomplete patient record and a multiple-choice medical question (A/B/C/D), the agent must conduct
+an interactive consultation to gather missing clinical information for the solution, then output exactly one final answer letter.
+
+The goal is to maximize diagnostic accuracy while maintaining consultation efficiency in terms of token usage.
+This is NOT a passive classification task — the agent must actively decide when to gather more information
+versus when sufficient evidence has been collected to make a confident diagnosis.
+
+
+OBJECTIVE
+
+Optimize a diagnostic agent that:
+1) Produces the correct final answer letter (A, B, C, or D) for each case
+2) Minimizes the number of follow-up questions and overall token usage without degrading diagnostic accuracy
+3) Implements an explicit decision policy during the consultation: gather more evidence vs commit to diagnosis
+
+Fitness is defined as diagnostic accuracy.
+Secondary behavioral descriptor via tokens count guides exploration.
+
+
+QUALITY CONSTRAINT (HARD GATE)
+
+The candidate must:
+- Return a valid final answer letter in {A, B, C, D} after concise consultation for every case
+- Implement a decision policy governing:
+  • whether to ask another question or commit to a diagnosis,
+  • how questions are generated,
+  • how the final answer is produced.
+
+Target: accuracy = 1.0 (perfect diagnostic accuracy)
+
+
+WHAT CAN BE OPTIMIZED
+
+You are encouraged to:
+- Improve system prompts and decision policies — this is how you change reasoning strategy for the
+  frozen LLM weights: different instructions yield different implicit chain-of-thought, risk
+  tolerance, and information-seeking behavior. Examples:
+    - Refine the system prompt and doctor persona (e.g. structured workup, explicit uncertainty
+      handling, stepwise differential before committing)
+    - Optimize question-generation prompts to:
+      * Focus on high-value missing information
+      * Avoid redundant or low-signal questions
+      * Generate medically relevant, atomic questions
+    - Modify final answer prompts to enforce strict output formatting
+- Adjust abstention/confidence strategy in code and in text (when to ask vs answer)
+- Restructure the consultation flow (e.g., hierarchical questioning, differential narrowing)
+- Improve early stopping logic when diagnosis becomes clear
+- Refactor technical scripts (e.g., answer parsing logic)
+
+
+WHAT MUST BE PRESERVED
+
+- The evaluation loop must remain compatible with run_mediq(...)
+- The entrypoint function signature must accept an optional context argument: def entrypoint(context=None)
+  The context is provided by the evolution framework and must be forwarded to run_mediq as seed:
+  seed = context.get("seed") if context else None; return run_mediq(CustomExpert, seed=seed, program_params=PROGRAM_PARAMS)
+- Expert subclass respond() interface
+- Each question response must contain exactly one atomic question string
+- Final answer must be exactly one letter: A, B, C, or D (no additional text)
+- Questions must be medically relevant and non-repetitive
+- Expert must not hallucinate diagnoses outside the provided options
+
+
+PROGRAM_PARAMS — MUTABLE HYPERPARAMETERS WITH STRICT RANGES
+
+Each program MUST define a top-level dict PROGRAM_PARAMS with exactly these keys.
+Values are integers. The program will CRASH if any value is outside the allowed range.
+
+  PROGRAM_PARAMS = {
+      "self_consistency": <int>,   # range [1, 3] — number of self-consistency iterations
+      "max_questions": <int>,      # range [1, 8] — maximum follow-up questions per case
+  }
+
+Rules:
+- PROGRAM_PARAMS must always be present and passed to run_mediq(..., program_params=PROGRAM_PARAMS).
+- You may change the VALUES within the allowed ranges above.
+- Do NOT remove keys, rename them, or add new keys.
+- Do NOT redefine these variables elsewhere in your code; use PROGRAM_PARAMS directly.
+- Values outside the ranges cause immediate ValueError — the run is aborted, no score.
+
+
+FAILURE MODES
+
+Common reasons for invalid solutions:
+- respond() returns malformed dict (missing "type", wrong keys)
+- Invalid answer letter (not in {A, B, C, D})
+- Multiple questions in one turn or non-question text
+- Hallucinating diagnoses, procedures, or medical entities not in the answer options
+- Over-aggressive early stopping → premature wrong answer letter
+- Overly conservative questioning → hitting question limit without accuracy gain
+- Breaking respond() interface
+
+Note on repairability:
+A solution that fails due to a superficial issue (e.g., dict key typo, missing import, minor prompt syntax)
+is preferable to a deeply conservative solution, if the core reasoning strategy is logically sound.
+
+
+HELPER FUNCTIONS AND FRAMEWORK
+
+Expert:
+- Expert – base class for decision strategies; concrete experts override respond() method
+- Expert method: ask_question(patient_state, prev_messages, task_prompt, question_generation_function)  - generates atomic question
+
+Concrete experts:
+- Each uses an abstention/decision logic to decide: ask or answer.
+- respond() returns {"type": "question", ...} or {"type": "choice", ...}.
+
+Patient simulation:
+- Patient responds based on their hidden medical record
+- Returns relevant facts or "The patient cannot answer this question, please do not ask this question again"
+
+Framework execution:
+- run_mediq(ExpertSubclass) evaluates your expert on all cases
+- For each case: iteratively calls expert.respond(patient_state)
+- Continues until expert returns type="choice" or max questions reached
+- Returns (dialogues, diagnoses, case_ids) for validation
+
+Key utilities available:
+- question_generation(...) – generates atomic question from prompts
+- get_response(...) – calls LLM with prompt
+- expert_response_choice(...) – extracts answer letter from LLM output
+- parse_something(...) – parses LLM output
+
+
+EVALUATION DETAILS
+
+Evaluation process:
+1) Framework loads medical cases with incomplete patient information
+2) For each case, your expert conducts interactive consultation:
+   - Calls expert.respond(patient_state) to decide: ask question or answer?
+   - If asking: patient responds with relevant facts, state updates, repeat
+   - If answering: records final diagnosis, moves to next case
+3) Compares final diagnoses to ground truth labels
+4) Computes metrics
+
+Reported metrics (aligned with evaluation; see metrics.yaml):
+- fitness — PRIMARY: raw diagnostic accuracy (fraction of correct final answers on this run).
+  Higher is better; typical range about 0.01–1.0 in specs.
+- tokens_count: average doctor token count per case (lower is better; efficiency).
+- ancestor_fitness_gap: weighted ancestor fitness minus raw accuracy on this run; large positive means
+  a sharp drop vs lineage and can set is_valid=0 (noise gate).
+- is_valid: 1 if the run is accepted, 0 if rejected by the validity gate (e.g. ancestor gap too large or there is an error in the code).
+
+
+KEY INSIGHT
+
+This is not a pure classification problem, but an active learning and decision-making problem.
+The agent must balance:
+- Information gain (asking questions to reduce diagnostic uncertainty)
+- Efficiency (avoiding unnecessary questions and token usage)
+- Risk (committing to a diagnosis with incomplete information)
+
+High-performing solutions typically adaptively decide when to gather more evidence versus when to commit to a diagnosis,
+using confidence estimation and strategic questioning to minimize consultation length while maximizing correctness.
+
+
+STRATEGIC VARIABILITY
+
+The evolutionary process is expected to explore heterogeneous reasoning styles.
+Possible paradigms include (but are not limited to):
+
+- Hypothesis ranking and elimination
+- Evidence accumulation and confidence thresholding
+- Differential diagnosis narrowing
+- High-information-gain questioning
+- Conservative multi-step confirmation
+- Aggressive early commitment with fallback logic
+- Hybrid strategies combining multiple decision principles
+
+No single reasoning paradigm is prescribed.
+The search space intentionally includes structurally different decision policies.
+
+
+EXPLORATION NOTE
+
+Multiple strategic approaches are expected to coexist:
+- Conservative strategies (ask more questions, higher accuracy ceiling, higher cost)
+- Aggressive strategies (fewer questions, risk of premature diagnosis, lower cost)
+- Adaptive strategies (confidence-based, balance accuracy and efficiency)
+- It is important to create and explore a diverse set of strategies, possibly combining different approaches from experts.
+
+Do not converge prematurely on a single strategy.
+Diverse decision policies are valuable, even if some are temporarily suboptimal.
+Exploration of structurally different policies is preferred over minor parameter tuning.

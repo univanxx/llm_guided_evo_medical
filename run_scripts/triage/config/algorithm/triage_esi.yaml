@@ -1,0 +1,119 @@
+# @package _global_
+
+defaults:
+  - _base
+
+exact_accuracy_bounds:
+  _target_: gigaevo.config.helpers.get_bounds
+  metrics_context: ${metrics_context}
+  key: exact_accuracy
+
+range_accuracy_bounds:
+  _target_: gigaevo.config.helpers.get_bounds
+  metrics_context: ${metrics_context}
+  key: range_accuracy
+
+recall_1_bounds:
+  _target_: gigaevo.config.helpers.get_bounds
+  metrics_context: ${metrics_context}
+  key: recall_1
+
+fitness_bounds:
+  _target_: gigaevo.config.helpers.get_bounds
+  metrics_context: ${metrics_context}
+  key: fitness
+
+exact_range_behavior_space:
+  _target_: gigaevo.config.helpers.build_behavior_space
+  keys:
+    - exact_accuracy
+    - range_accuracy
+  bounds:
+    - ${exact_accuracy_bounds}
+    - ${range_accuracy_bounds}
+  resolutions:
+    - 60
+    - 40
+  binning_types:
+    - ${binning_type}
+    - ${binning_type}
+
+fitness_safety_behavior_space:
+  _target_: gigaevo.config.helpers.build_behavior_space
+  keys:
+    - fitness
+    - recall_1
+  bounds:
+    - ${fitness_bounds}
+    - ${recall_1_bounds}
+  resolutions:
+    - 50
+    - 40
+  binning_types:
+    - ${binning_type}
+    - ${binning_type}
+
+islands:
+  - _target_: gigaevo.evolution.strategies.map_elites.IslandConfig
+    island_id: exact_range_island
+    max_size: ${island_max_size}
+    behavior_space: ${exact_range_behavior_space}
+
+    archive_selector:
+      _target_: gigaevo.evolution.strategies.map_elites.SumArchiveSelector
+      fitness_keys: [exact_accuracy, range_accuracy]
+      fitness_key_higher_is_better: [true, true]
+      weights: [0.7, 0.3]
+
+    elite_selector:
+      _target_: gigaevo.evolution.strategies.map_elites.FitnessProportionalEliteSelector
+      fitness_key: exact_accuracy
+      fitness_key_higher_is_better: true
+
+    archive_remover:
+      _target_: gigaevo.evolution.strategies.map_elites.FitnessArchiveRemover
+      fitness_key: exact_accuracy
+      fitness_key_higher_is_better: true
+
+    migrant_selector:
+      _target_: gigaevo.evolution.strategies.map_elites.TopFitnessMigrantSelector
+      fitness_key: exact_accuracy
+      fitness_key_higher_is_better: true
+
+    migration_rate: ${migration_rate}
+
+  - _target_: gigaevo.evolution.strategies.map_elites.IslandConfig
+    island_id: fitness_safety_island
+    max_size: ${island_max_size}
+    behavior_space: ${fitness_safety_behavior_space}
+
+    archive_selector:
+      _target_: gigaevo.evolution.strategies.map_elites.SumArchiveSelector
+      fitness_keys: [fitness, recall_1]
+      fitness_key_higher_is_better: [true, true]
+      weights: [0.8, 0.2]
+
+    elite_selector:
+      _target_: gigaevo.evolution.strategies.map_elites.FitnessProportionalEliteSelector
+      fitness_key: fitness
+      fitness_key_higher_is_better: true
+
+    archive_remover:
+      _target_: gigaevo.evolution.strategies.map_elites.FitnessArchiveRemover
+      fitness_key: fitness
+      fitness_key_higher_is_better: true
+
+    migrant_selector:
+      _target_: gigaevo.evolution.strategies.map_elites.TopFitnessMigrantSelector
+      fitness_key: fitness
+      fitness_key_higher_is_better: true
+
+    migration_rate: ${migration_rate}
+
+evolution_strategy:
+  _target_: gigaevo.evolution.strategies.map_elites.MapElitesMultiIsland
+  island_configs: ${islands}
+  program_storage: ${ref:redis_storage}
+  migration_interval: ${migration_interval}
+  enable_migration: ${enable_migration}
+  max_migrants_per_island: ${max_migrants_per_island}

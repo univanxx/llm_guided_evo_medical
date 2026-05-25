@@ -1,0 +1,118 @@
+TASK DEFINITION – MEDGEMMA PNEUMONIAMNIST (BINARY CHEST X-RAY CLASSIFICATION) – v6
+
+Goal
+----
+Maximize classification accuracy of a medical VLM (MedGemma) on a fixed local subset of PneumoniaMNIST.
+
+Dataset
+-------
+- Local folder: data/pneumoniamnist_subset/
+- Size: depends on your local subset folder (default zip contains 40 images total)
+- Source format: PNG chest X-rays (grayscale converted to RGB for API)
+- Class schema:
+    0 -> normal
+    1 -> pneumonia
+
+What is “pneumonia” (for prompt engineering)
+--------------------------------------------
+Pneumonia is an infection/inflammation of lung parenchyma. On chest X-ray it commonly presents as:
+- focal or lobar airspace opacity / consolidation
+- patchy infiltrates or interstitial opacities
+- air bronchograms
+- sometimes pleural effusion or volume loss (may be confounded with atelectasis)
+
+Confounders and pitfalls: atelectasis, pulmonary edema, ARDS, motion/underexposure, rotated views, medical devices.
+
+Objective / Fitness
+-------------------
+- Primary metric: accuracy (fitness) on the subset.
+- The validator also reports JSON parse_success_rate and confusion matrix.
+
+Candidate Program Interface
+---------------------------
+Each candidate program should define:
+
+    def entrypoint():
+        return PROMPT
+
+where PROMPT is a single string instruction to the model.
+
+Candidate programs should return ONLY a prompt string.
+
+IMPORTANT (anti-cheating)
+-------------------------
+The evaluator uses a fixed VLM + fixed image preprocessing (see helper.py):
+  - model: Google/Medgemma-1.5-4b-it
+  - image normalization: resize+pad to 896×896
+Evolved programs cannot change these values.
+
+Runtime knobs (via env)
+-----------------------
+- MEDGEMMA_MODEL: override model (debug only; default is fixed)
+- MEDGEMMA_IMAGE_SIZE (or MEDGEMMA_RESIZE): override image size (debug only; default 896)
+- PNEUMONIA_NUM_IMAGES / MEDGEMMA_NUM_IMAGES: evaluate only first N images from manifest (default: all)
+
+Validator / Runtime
+-------------------
+- validate.py loads the subset via manifest.jsonl, calls MedGemma via OpenAI-compatible chat.completions,
+  parses strict JSON predictions, and computes accuracy.
+- Images are resized+letterboxed to 896×896.
+
+Credentials
+-----------
+Provide either:
+- env vars: MEDGEMMA_BASE_URL and MEDGEMMA_API_KEY
+or
+- kv.py next to helper.py with variables base_url and api_key.
+
+Prompt evolution ideas (high signal)
+------------------------------------
+1) Strict output contract:
+   - enforce: JSON only, exactly keys {class_id, class_name}, choose ONE of {0,1}.
+   - add self-check: if not sure, still pick the most likely class, never output “unknown”.
+
+2) Radiology checklist:
+   - systematically scan lung fields for focal airspace opacities, lobar consolidation,
+     interstitial patterns, air bronchograms; check pleura for effusion; compare sides.
+
+3) Decision thresholding:
+   - bias toward “normal” unless clear airspace disease is present (reduces false positives),
+     or the opposite if dataset is pneumonia-heavy (experiment).
+
+4) Error reduction:
+   - add “do not include markdown”, “do not explain”, “do not output multiple JSON objects”.
+   - add “if you output anything besides JSON, the answer is invalid”.
+
+5) Calibration / deliberation:
+   - instruct the model to reason silently (no CoT in output) and then output JSON.
+   - request a brief internal checklist (not printed) before answering.
+
+6) Domain constraints:
+   - remind that images are pediatric AP/PA-style CXRs (often in PneumoniaMNIST-derived datasets).
+   - mention typical pneumonia patterns in pediatrics (perihilar, patchy, lobar).
+
+Files
+-----
+- helper.py           : shared helpers (I/O, preprocessing, parsing, defaults)
+- validate.py         : EV validator computing fitness
+- metrics.yaml        : metric specs (fitness = accuracy)
+- initial_programs/   : starting prompt programs
+- data/               : dataset subset used by the validator
+Version 6 notes
+---------------
+- The EV return contract is strictly Dict[str, float]. Any debug info is written to files:
+    * <subset_dir>/predictions_latest.jsonl
+    * <subset_dir>/metrics_latest.json
+    * <subset_dir>/last_validator_error.txt
+- If a model response is not valid JSON, that example is counted as WRONG (it contributes to denominator).
+- Credentials are loaded from:
+    * MEDGEMMA_BASE_URL / MEDGEMMA_API_KEY, or
+    * OPENAI_BASE_URL / OPENAI_API_BASE + OPENAI_API_KEY, or
+    * kv.py next to this task.
+  If you use Hydra llm=airi_med, still export OPENAI_BASE_URL+OPENAI_API_KEY, because the validator
+  runs in a separate process and may not see Hydra objects.
+
+- New in v6:
+  * Fixed model: Google/Medgemma-1.5-4b-it (not overridable by programs)
+  * Fixed image normalization: 896×896 resize+pad (not overridable by programs)
+  * Optional env to evaluate only first N images: PNEUMONIA_NUM_IMAGES / MEDGEMMA_NUM_IMAGES

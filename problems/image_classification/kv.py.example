@@ -1,0 +1,4 @@
+# Copy this file to kv.py and fill in your credentials.
+# kv.py is in .gitignore and must never be committed.
+base_url = "https://your-inference-endpoint/v1"
+api_key = "your-api-key-here"

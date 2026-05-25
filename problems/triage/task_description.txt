@@ -1,0 +1,57 @@
+TASK DEFINITION - ESI TRIAGE PREDICTION
+
+Goal: predict the Emergency Severity Index (ESI) level for each patient.
+
+Output contract:
+- Return one integer level from 1 to 5 for every patient.
+- 1 means immediate life-saving intervention is required.
+- 5 means the least urgent presentation.
+
+Inputs available for each patient:
+- `hpi`: symptom narrative extracted from the discharge note
+- `patient_info`: age, sex, and race
+- `initial_vitals`: first recorded ED vital signs
+- `chief_complaint`: short complaint text when available
+
+Primary comparison metrics:
+- exact-match accuracy
+- article-style range accuracy:
+  - true 1 -> only 1 is correct
+  - true 2 -> 1 or 2 is correct
+  - true 3 -> 2 or 3 is correct
+  - true 4 -> 3 or 4 is correct
+  - true 5 -> 4 or 5 is correct
+
+Optimization target in the validator:
+- fitness = 0.65 * exact_accuracy + 0.25 * range_accuracy + 0.10 * recall_1
+- validity gate: exact_accuracy >= 0.20
+
+Quality priorities:
+1. Improve exact ESI accuracy while preserving the article's range metric.
+2. Avoid undertriage, especially errors of two or more levels.
+3. Keep ESI-1 sensitivity high.
+4. Maintain reliable output formatting for every patient.
+
+The benchmark split is held out from evolution. Candidate programs should
+generalize from the train split rather than memorize benchmark examples.
+
+REFERENCE KNOWLEDGE
+
+A local ESI/triage reference knowledge base is available through helper.py:
+- `load_esi_kb()`
+- `load_esi_kb_text()`
+
+Some seed programs use the KB and some do not. Mutations may explore both
+families. Prefer useful retrieval or concise reference use over dumping large
+irrelevant context.
+
+MODEL ACCESS
+
+`helper.py` also exposes:
+- `get_models()`
+- `get_model(index)`
+- `ask_llm(...)`
+- `ask_llm_json(...)`
+
+Programs may use one-shot prompting, structured multi-stage reasoning, voting,
+retrieval, or hybrids as long as they return valid ESI outputs.

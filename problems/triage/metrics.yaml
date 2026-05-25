@@ -1,0 +1,88 @@
+specs:
+  fitness:
+    description: Combined ESI score (65% exact, 25% range, 10% ESI-1 recall)
+    decimals: 4
+    is_primary: true
+    higher_is_better: true
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: false
+    significant_change: 0.02
+    sentinel_value: 0.0
+
+  exact_accuracy:
+    description: Exact-match ESI accuracy
+    decimals: 4
+    is_primary: false
+    higher_is_better: true
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: true
+    significant_change: 0.02
+    sentinel_value: 0.0
+
+  range_accuracy:
+    description: Article-style ESI range accuracy
+    decimals: 4
+    is_primary: false
+    higher_is_better: true
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: true
+    significant_change: 0.02
+    sentinel_value: 0.0
+
+  undertriage_rate:
+    description: Fraction predicted less urgent than the reference ESI
+    decimals: 4
+    is_primary: false
+    higher_is_better: false
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: true
+    significant_change: 0.02
+    sentinel_value: 1.0
+
+  overtriage_rate:
+    description: Fraction predicted more urgent than the reference ESI
+    decimals: 4
+    is_primary: false
+    higher_is_better: false
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: true
+    significant_change: 0.02
+    sentinel_value: 1.0
+
+  severe_undertriage_rate:
+    description: Fraction undertriaged by two or more ESI levels
+    decimals: 4
+    is_primary: false
+    higher_is_better: false
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: true
+    significant_change: 0.01
+    sentinel_value: 1.0
+
+  recall_1:
+    description: Recall for the most urgent ESI-1 class
+    decimals: 4
+    is_primary: false
+    higher_is_better: true
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: true
+    significant_change: 0.02
+    sentinel_value: 0.0
+
+  is_valid:
+    description: Passes the minimum exact-accuracy quality gate
+    decimals: 0
+    is_primary: false
+    higher_is_better: true
+    lower_bound: 0.0
+    upper_bound: 1.0
+    include_in_prompts: false
+    significant_change: 1
+    sentinel_value: 0.0
