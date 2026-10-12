@@ -1,145 +1,137 @@
-# med_pneu_v12_27b_r128_iv README
+# MedGemma pipeline evolution on PneumoniaMNIST
 
-Prompt-evolution task for binary chest X-ray classification with MedGemma VLM.
+This experiment uses an evolutionary search to optimize the instruction prompt and decoding settings of a medical vision-language model. Each candidate is a Python program that returns a prompt and sampling parameters. Model weights remain fixed. The task is binary chest X-ray classification: **0 = normal**, **1 = pneumonia**.
 
-The experiment evaluates prompts on `problems/med_pneu_v12_27b_r128_iv/data/pneumoniamnist_subset`:
+The experiment covers [MedGemma 1.5 4B IT](https://huggingface.co/google/medgemma-1.5-4b-it) and [MedGemma 27B IT](https://huggingface.co/google/medgemma-27b-it), each at input resolutions **28, 64, 128, and 224**. The 27B model must be the multimodal variant. A separate GPT-OSS-120B endpoint proposes candidate programs. Both endpoints use the OpenAI-compatible chat-completions protocol.
 
-- `0`: normal
-- `1`: pneumonia
+## Data
 
-Candidate programs in `initial_programs/*.py` should only return a prompt string from `entrypoint()`. The evaluator fixes model/runtime settings in `helper.py` and environment variables.
+[PneumoniaMNIST](https://medmnist.com/) contains grayscale pediatric chest X-rays. Its public split has 4,708 training, 524 validation, and 624 test images. This experiment uses a fixed balanced subset of **100 training images (50 per class)** and all **624 test images (234 normal, 390 pneumonia)**. Validation images are not used by the search. See the [dataset release](https://zenodo.org/records/10519652) for download and licensing information.
 
-## Ubuntu Environment
+The same image indices are used for both models and all four resolutions. `manifests/` defines the selected indices, labels, and image checksums. `prepare_data.py` downloads the resolution-specific arrays and verifies selected image pixels before producing local PNGs. Images and model weights are obtained separately. Before inference, each image is converted to RGB and resized with bicubic interpolation to a 896 × 896 canvas.
 
-Run from the repository root.
+PneumoniaMNIST images use CC BY 4.0. See [dataset attribution and references](DATA_ATTRIBUTION.md) for source credits, licensing, and the transformations performed by this experiment.
 
-```bash
-cd /path/to/evolve
-conda env create -f problems/med_pneu_v12_27b_r128_iv/environment.yml
-conda activate EvolvePy312
-```
+## Search and evaluation
 
-If the environment already exists:
+The search uses the pinned [GigaEvo engine](https://github.com/FusionBrainLab/gigaevo-core/tree/2fccecc62481b4b9c5d4be9b2f1a6d2cf84769e4) with a single MAP-Elites island, a one-dimensional fitness archive with 150 bins, and a maximum archive size of 75. Ten initial programs are followed by 232 proposed descendants. Search seeds 43, 44, and 45 define three independent searches per model/resolution pair. Parent evaluations are refreshed during selection.
 
-```bash
-conda env update -n EvolvePy312 -f problems/med_pneu_v12_27b_r128_iv/environment.yml --prune
-conda activate EvolvePy312
-```
+Candidates optimize the prompt together with `temperature` in `{0, 0.1, 0.3, 0.6}` and `top_p` in `{0.9, 1.0}`. Temperature zero is normalized to `top_p=1`. Model, resolution, preprocessing, and the 256-token response limit are fixed outside candidate programs. The mutator uses temperature 0.6 and an 8,192-token limit.
 
-The quick tests rely mainly on `openai`, `httpx`, `pillow`, `numpy`, `pyyaml`, and the local `gigaevo` package. The task-local `environment.yml` is the preferred reproducible setup.
+Fitness is accuracy on the balanced 100-image training subset, where it equals balanced accuracy. The validator accepts a JSON object containing matching `class_id` and `class_name` values. Invalid answers count as errors of their true class. The best initial candidate and best descendant are selected independently using training fitness, then each is evaluated three times on test. Test responses are never used for selection. Per-pass outputs include accuracy, macro-F1, sensitivity, specificity, and invalid-answer counts; the summary command also calculates pneumonia F1 and balanced accuracy from saved predictions.
 
-## Credentials
+## Ubuntu quick start
 
-Preferred local option: write a fresh key to task-local `kv.py`.
+Use Ubuntu 24.04 with Python 3.12. Commands below run from the repository root. API access to the two model endpoints is required for actual inference; the experiment client itself does not require a GPU.
 
 ```bash
-cat > problems/image_classification/kv.py <<'PY'
-base_url = "https://<your-inference-endpoint>/v1"
-api_key = "PASTE_FRESH_KEY_HERE"
-PY
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv screen
+bash run_scripts/image_classification/setup_ubuntu.sh
+source run_scripts/image_classification/.venv/bin/activate
+export PYTHONDONTWRITEBYTECODE=1
+
+python -B run_scripts/image_classification/prepare_data.py --download
+python -B -m pytest run_scripts/image_classification/tests -q -p no:cacheprovider
 ```
 
-Alternative via environment variables:
+The setup script downloads the pinned engine into `../gigaevo-core` and creates a task-specific virtual environment using the versions in `constraints-ubuntu-py312.txt`. Set `GIGAEVO_DIR` to use another engine location. The dataset is prepared in `problems/image_classification/data`. To prepare only one resolution, add `--resolutions 128` and use a separate `--output` directory. Pass that directory to the launcher with `--data-root`.
+
+To check the entire search and completed-run resume through a local test server, run the following command after preparing the data. It uses deterministic mock responses and does not measure model accuracy or require API credentials:
 
 ```bash
-export MEDGEMMA_BASE_URL='https://<your-inference-endpoint>/v1'
-export MEDGEMMA_API_KEY='PASTE_FRESH_KEY_HERE'
+python -B run_scripts/image_classification/smoke_offline.py \
+  --output-root run_scripts/image_classification/outputs/offline-smoke
 ```
 
-OpenAI-compatible names also work:
+Configure credentials in the task-local `.env` file:
 
 ```bash
-export OPENAI_BASE_URL='https://<your-inference-endpoint>/v1'
-export OPENAI_API_KEY='PASTE_FRESH_KEY_HERE'
+cp run_scripts/image_classification/.env.example run_scripts/image_classification/.env
+chmod 600 run_scripts/image_classification/.env
+# Edit .env and set EVALUATOR_API_KEY and MUTATOR_API_KEY.
 ```
 
-## Models
+The endpoint URLs below are examples for local inference servers. Replace them with your serving endpoints. Set `--evaluator-model` and `--mutator-model` when the server exposes different model identifiers. An API server that does not require authentication can use a nonempty placeholder key.
 
-Default 27B multimodal model:
+Run a short end-to-end check with one initial candidate, one descendant, two balanced train images, and two test images per pass:
 
 ```bash
-export MEDGEMMA_MODEL='Google/Medgemma-27b-it'
+python -B run_scripts/image_classification/run_experiment.py \
+  --model 4b --resolution 128 --smoke \
+  --evaluator-base-url http://127.0.0.1:8000/v1 \
+  --mutator-base-url http://127.0.0.1:8001/v1 \
+  --run-dir run_scripts/image_classification/outputs/smoke-4b-r128
 ```
 
-4B compatibility check:
+Use `--model 27b` for the other model. A successful smoke run ends with `status: completed` in `run_status.json` and creates `paired_evaluation/summary.json`.
+
+## Full experiments
+
+A single full search:
 
 ```bash
-export MEDGEMMA_MODEL='Google/Medgemma-1.5-4b-it'
+python -B run_scripts/image_classification/run_experiment.py \
+  --model 27b --resolution 128 --seed 43 \
+  --evaluator-base-url http://127.0.0.1:8000/v1 \
+  --mutator-base-url http://127.0.0.1:8001/v1 \
+  --run-dir run_scripts/image_classification/outputs/medgemma-27b-r128-s43
 ```
 
-Use multimodal models only. Do not use `27b-text-it` for this task because images are part of the input.
-
-Both 27B and 4B use the same image input size in this task:
+The matrix launcher runs 24 searches sequentially: two models × four resolutions × three seeds. Its endpoint must serve the model selected by each request. Preview the commands with `--dry-run`. Run long jobs in a detached session:
 
 ```bash
-export MEDGEMMA_IMAGE_SIZE='896'
+screen -dmS medgemma-search bash -c '
+  source run_scripts/image_classification/.venv/bin/activate
+  export PYTHONDONTWRITEBYTECODE=1
+  python -B run_scripts/image_classification/run_matrix.py \
+    --output-root run_scripts/image_classification/outputs/matrix \
+    --evaluator-base-url http://127.0.0.1:8000/v1 \
+    --mutator-base-url http://127.0.0.1:8001/v1 \
+    > run_scripts/image_classification/matrix.log 2>&1
+'
+screen -r medgemma-search
 ```
 
-`MEDGEMMA_RESIZE` is also supported, but prefer `MEDGEMMA_IMAGE_SIZE` for clarity.
+Detach from the console with `Ctrl-A`, then `D`. To continue an interrupted search, repeat its command with `--resume`. For a matrix, pass `--resume` to the matrix launcher. Completed image responses from the same interrupted evaluation are reused; new evaluation passes receive fresh responses.
 
-## Smoke Tests
+## Results
 
-Fast data check:
+Each run directory contains:
+
+| Path | Contents |
+| --- | --- |
+| `run_config.json` | Model, resolution, search seed, protocol, and dataset identity |
+| `gigaevo_config.yaml` | Effective engine configuration |
+| `run_status.json` | Progress and final status |
+| `candidates/`, `candidates.json` | Candidate programs, prompt/decoder payloads, and train scores |
+| `best_initial/`, `best_evolved/` | Train-selected winners for the two roles |
+| `paired_evaluation/selection.json` | Fixed selection and test settings |
+| `paired_evaluation/summary.json` | Test results for both selected roles |
+| `paired_evaluation/*/final_evaluation/` | Per-image predictions and per-pass metrics |
+| `gateway_evaluator/`, `gateway_mutator/` | Request-attempt status and reported token usage |
+
+To select a pair across three searches using train scores, then run its test evaluation:
 
 ```bash
-python problems/med_pneu_v12_27b_r128_iv/debug_run_initials.py --quick
+python -B run_scripts/image_classification/evaluate.py \
+  --evolution-run run_scripts/image_classification/outputs/matrix/medgemma-27b-r128-s43 \
+  --evolution-run run_scripts/image_classification/outputs/matrix/medgemma-27b-r128-s44 \
+  --evolution-run run_scripts/image_classification/outputs/matrix/medgemma-27b-r128-s45 \
+  --final-repeats 5 \
+  --run-dir run_scripts/image_classification/outputs/selected-27b-r128
 ```
 
-Expected: dataset exists, `label_map.json` exists, 100 rows detected, sampled files present.
+Within a search, equal fitness is resolved by the latest stored update counter, then program identifier. Across searches, equal train fitness is resolved by the lower search seed. The command above performs a new test evaluation. Use `--skip-final-evaluation` on the original search commands if only the cross-search pair is needed.
 
-One VLM request per initial prompt with 27B:
+To evaluate one exported candidate directly, use `evaluate.py --candidate PATH --model 4b --resolution 128 --split test --repeats 3 --run-dir OUTPUT` with the corresponding endpoint options.
+
+Aggregate the individual search results without additional inference:
 
 ```bash
-export MEDGEMMA_MODEL='Google/Medgemma-27b-it'
-export MEDGEMMA_IMAGE_SIZE='896'
-python problems/med_pneu_v12_27b_r128_iv/debug_run_initials.py --smoke-vlm
+python -B run_scripts/image_classification/summarize_results.py \
+  run_scripts/image_classification/outputs/matrix/medgemma-* \
+  --output run_scripts/image_classification/outputs/tables
 ```
 
-One VLM request per initial prompt with 4B:
-
-```bash
-export MEDGEMMA_MODEL='Google/Medgemma-1.5-4b-it'
-export MEDGEMMA_IMAGE_SIZE='896'
-python problems/med_pneu_v12_27b_r128_iv/debug_run_initials.py --smoke-vlm
-```
-
-Short validation run over the first few images:
-
-```bash
-export PNEUMONIA_NUM_IMAGES='4'
-export MEDGEMMA_MODEL='Google/Medgemma-27b-it'
-export MEDGEMMA_IMAGE_SIZE='896'
-python problems/med_pneu_v12_27b_r128_iv/debug_run_initials.py
-unset PNEUMONIA_NUM_IMAGES
-```
-
-## Full Initials Run
-
-```bash
-export MEDGEMMA_MODEL='Google/Medgemma-27b-it'
-export MEDGEMMA_IMAGE_SIZE='896'
-python problems/med_pneu_v12_27b_r128_iv/debug_run_initials.py
-```
-
-Generated artifacts:
-
-- `problems/med_pneu_v12_27b_r128_iv/data/pneumoniamnist_subset/predictions_latest.jsonl`
-- `problems/med_pneu_v12_27b_r128_iv/data/pneumoniamnist_subset/metrics_latest.json`
-- `problems/med_pneu_v12_27b_r128_iv/data/pneumoniamnist_subset/last_validator_error.txt`
-
-## GigaEvo Run Sketch
-
-Use the normal repo entrypoint and select this problem. Exact overrides depend on the active experiment config, but the important part is to pin the model and image size in the process environment:
-
-```bash
-export MEDGEMMA_MODEL='Google/Medgemma-27b-it'
-export MEDGEMMA_IMAGE_SIZE='896'
-python run.py problem.name=med_pneu_v12_27b_r128_iv
-```
-
-Before long runs, always confirm:
-
-- `--quick` passes;
-- `--smoke-vlm` returns model responses, not credential errors;
-- the model printed by the smoke script is the intended 27B or 4B multimodal model;
-- `metrics_latest.json` records `"resize": 896`.
+`per_search.csv` averages test repetitions within each search. `conditions.csv` reports the mean and sample standard deviation across independent searches for each model, resolution, and role. Metric values are fractions; multiply by 100 for percentages.

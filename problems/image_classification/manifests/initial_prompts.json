@@ -1,0 +1,32 @@
+{
+  "baseline.py": {
+    "prompt_sha256": "1750a8bc4cef68918061fee52f3f49cf6c97d37990b5a0935f563d6073d57caf"
+  },
+  "conservative_threshold.py": {
+    "prompt_sha256": "b80f3568b59d57829939081401a696f7ff7b23177c61f026f4bee6a7a6391f89"
+  },
+  "differential_guardrails.py": {
+    "prompt_sha256": "3d49684148abc3a880ac178a96058e21d4781f589ba85856c74fa6c3ab4d789e"
+  },
+  "findings_then_label.py": {
+    "prompt_sha256": "a8b2a613624dc59c3ba6728e56baca394f52a423cdfe8fb9d5c0586b05a1fe62"
+  },
+  "pediatric_context.py": {
+    "prompt_sha256": "19b0a2c8dc4b01a6ef82a69178d6bdfaed99225ff04fe7ccf35739d7b05492b4"
+  },
+  "radiology_checklist.py": {
+    "prompt_sha256": "ce80654cb799e82ec1a24506c8107f7a625e551b87a4cccd00b8d093ce97cda1"
+  },
+  "schema_repair.py": {
+    "prompt_sha256": "11c1da206d87d8d31a5f9e48afdf2f090d076453c135b1db7e424c209b14ae5a"
+  },
+  "self_check_json.py": {
+    "prompt_sha256": "b327c8183405d362509f1a5d0634f985750361c3556f560fc19fd4f836e9d0ce"
+  },
+  "sensitive_threshold.py": {
+    "prompt_sha256": "3bb5e12b42f27cf23a877235959d25e335d1d2715e71cef95b820dbc5678a6c9"
+  },
+  "techreport_style.py": {
+    "prompt_sha256": "aa9c3f887d675c6cdf4c98a7774112ccc896870344d00e2d97bcda0edc85acde"
+  }
+}

@@ -17,4 +17,5 @@ No extra text.
 """
 
 def entrypoint():
-    return PROMPT
+    """Return the initial prompt with the canonical greedy sampling configuration."""
+    return {"prompt": PROMPT, "sampling": {"temperature": 0.0, "top_p": 1.0}}

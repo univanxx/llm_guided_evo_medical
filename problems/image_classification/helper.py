@@ -1,355 +1,205 @@
-"""med_pneu_v6 helper
-
-Helper utilities for the EV task: MedGemma PneumoniaMNIST (binary CXR classification).
-
-Design goals
-------------
-- Keep candidate programs *simple*: they mainly mutate a PROMPT string.
-- Provide robust I/O: strict JSON parsing, image preprocessing, and OpenAI-compatible calls.
-- Make evaluation reproducible and easy to run outside EV.
-
-Credentials
------------
-Provide either:
-- env vars: MEDGEMMA_BASE_URL + MEDGEMMA_API_KEY (task-local names)
-  or OPENAI_BASE_URL + OPENAI_API_KEY (GigaEvo/LangChain-friendly)
-or
-- a kv.py next to this file with: base_url = "..."; api_key = "..."
-
-Environment knobs (optional)
-----------------------------
-These affect evaluation but are NOT allowed to be changed by evolved programs.
-
-- MEDGEMMA_MODEL: model name (default: Google/Medgemma-1.5-4b-it)
-- MEDGEMMA_IMAGE_SIZE (or MEDGEMMA_RESIZE): int square size for resize+pad (default: 896; 0 disables)
-- MEDGEMMA_TEMPERATURE: float (default: 0.0)
-- MEDGEMMA_MAX_TOKENS: int (default: 256)
-- MEDGEMMA_CONCURRENCY: int (default: 8)
-- MEDGEMMA_INSECURE_SSL: "1" disables TLS cert verification (default: 0)
-- PNEUMONIA_SUBSET_DIR: path to subset dir (default: data/pneumoniamnist_subset)
-- PNEUMONIA_NUM_IMAGES / MEDGEMMA_NUM_IMAGES: int; how many images to evaluate (default: unset -> ALL)
-"""
+"""Shared candidate contract, fixed experiment settings, data loading, and prediction parsing."""
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import io
 import json
 import os
-import re
-from dataclasses import dataclass
+import runpy
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any
 
-import numpy as np
-from PIL import Image
+from PIL import Image, __version__ as pillow_version, features
 
-
-# Binary labels for PneumoniaMNIST (MedMNIST).
-PNEUMONIA_LABEL_MAP: Dict[int, str] = {0: "normal", 1: "pneumonia"}
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
-
-
-def _parse_optional_int(x: str | None) -> int | None:
-    if x is None:
-        return None
-    x = str(x).strip()
-    if not x:
-        return None
-    try:
-        v = int(x)
-    except Exception:
-        return None
-    if v <= 0:
-        return None
-    return v
+TASK_ROOT = Path(__file__).resolve().parent
+MODEL_IDS = {"4b": "google/medgemma-1.5-4b-it", "27b": "google/medgemma-27b-it"}
+LABELS = {0: "normal", 1: "pneumonia"}
+TEMPERATURES = (0.0, 0.1, 0.3, 0.6)
+TOP_PS = (0.9, 1.0)
+TOP_KS = (-1, 20, 50)
 
 
-def _default_subset_dir() -> str:
-    """Default experiment subset: task-local data/pneumoniamnist_subset."""
-    task_root = Path(__file__).resolve().parent
-    return str((task_root / "data" / "pneumoniamnist_subset").resolve())
+def get_default_settings() -> dict[str, Any]:
+    """Read researcher-controlled settings; candidates cannot choose model, data, or limits."""
+    model = os.getenv("PNEUMONIA_MODEL", "4b")
+    resolution = int(os.getenv("PNEUMONIA_RESOLUTION", "28"))
+    if model not in MODEL_IDS or resolution not in (28, 64, 128, 224):
+        raise ValueError("PNEUMONIA_MODEL must be 4b or 27b and resolution must be 28, 64, 128, or 224")
+    limit = os.getenv("PNEUMONIA_MAX_IMAGES") or os.getenv("PNEUMONIA_NUM_IMAGES")
+    seed = os.getenv("PNEUMONIA_SEED")
+    data_root = Path(os.getenv("PNEUMONIA_DATA_ROOT", str(TASK_ROOT / "data")))
+    settings = {"model_choice": model, "model": os.getenv("MEDGEMMA_MODEL", MODEL_IDS[model]), "resolution": resolution, "resize": 896, "max_tokens": 256, "concurrency": int(os.getenv("MEDGEMMA_CONCURRENCY", "8")), "num_images": int(limit) if limit else None, "repeats": int(os.getenv("PNEUMONIA_REPEATS", "1")), "seed": int(seed) if seed else None, "http_timeout": float(os.getenv("MEDGEMMA_HTTP_TIMEOUT_SECONDS") or os.getenv("PNEUMONIA_REQUEST_TIMEOUT") or "16200"), "base_url": os.getenv("MEDGEMMA_BASE_URL", ""), "api_key": os.getenv("MEDGEMMA_API_KEY", ""), "data_root": str(data_root / f"r{resolution}"), "output_root": os.getenv("PNEUMONIA_RUN_DIR", str(TASK_ROOT.parents[2] / "runs" / "standalone")), "search_space": os.getenv("PNEUMONIA_SEARCH_SPACE", "joint"), "top_k_enabled": os.getenv("PNEUMONIA_ENABLE_TOP_K", "0").lower() in ("1", "true"), "run_id": os.getenv("PNEUMONIA_RUN_ID", "standalone"), "evaluation_instance_id": os.getenv("PNEUMONIA_EVALUATION_INSTANCE_ID") or os.getenv("GIGAEVO_PROGRAM_ID")}
+    if settings["concurrency"] < 1 or settings["repeats"] < 1 or settings["http_timeout"] <= 0 or settings["num_images"] is not None and settings["num_images"] < 1:
+        raise ValueError("Concurrency, repeats, timeout, and optional image limit must be positive")
+    if settings["search_space"] not in ("joint", "prompt-only"):
+        raise ValueError("PNEUMONIA_SEARCH_SPACE must be joint or prompt-only")
+    return settings
 
 
-# --- Fixed model + vision preprocessing for evaluation ---
-#
-# We *intentionally* keep these out of candidate programs so the evolutionary loop
-# can only mutate the prompt (and not change the underlying model or image resize).
-#
-# MedGemma 1.5 4B IT expects images normalized to 896×896. (See model card / docs.)
-
-
-#FIXED_MEDGEMMA_MODEL: str = os.getenv("MEDGEMMA_MODEL", "Google/Medgemma-1.5-4b-it") #!!!
-FIXED_MEDGEMMA_MODEL: str = os.getenv("MEDGEMMA_MODEL", "Google/Medgemma-27b-it") #!!!
-
-FIXED_IMAGE_SIZE: int = int(
-    os.getenv("MEDGEMMA_IMAGE_SIZE")
-    or os.getenv("MEDGEMMA_RESIZE")
-    or "896"
-)
-
-
-@dataclass(frozen=True)
-class ManifestRow:
-    rel_path: str
-    label_id: int
-    label_name: str
-    split: str
-    original_index: int
-
-
-def load_kv_if_present() -> Tuple[str | None, str | None]:
-    """Return (base_url, api_key) from env or kv.py.
-
-    Why this exists
-    ---------------
-    In GigaEvo the validator is executed in a separate process (exec_runner). That
-    process does NOT reliably "see" Hydra LLM config objects and therefore
-    cannot always access your base_url/api_key from config. So we load credentials
-    from:
-      1) MEDGEMMA_BASE_URL + MEDGEMMA_API_KEY (task-local)
-      2) OPENAI_BASE_URL/OPENAI_API_BASE + OPENAI_API_KEY (common OpenAI-compatible vars)
-      3) kv.py next to this task file (task folder)
-
-    Fallbacks
-    ---------
-    If base_url is missing, we can fall back to MEDGEMMA_FALLBACK_BASE_URL.
-    If api_key is missing, we fall back to
-    MEDGEMMA_FALLBACK_API_KEY (defaults to "DUMMY"), because many OpenAI-compatible
-    servers accept any non-empty key.
-    """
-    env_base = (
-        os.getenv("MEDGEMMA_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or os.getenv("OPENAI_API_BASE")
-    )
-    env_key = os.getenv("MEDGEMMA_API_KEY") or os.getenv("OPENAI_API_KEY")
-
-    fallback_base = os.getenv("MEDGEMMA_FALLBACK_BASE_URL", "")
-    fallback_key = os.getenv("MEDGEMMA_FALLBACK_API_KEY", "DUMMY")
-
-    # If at least something is present, use fallbacks for the rest.
-    if env_base or env_key:
-        return (env_base or fallback_base), (env_key or fallback_key)
-
-    # Finally, try kv.py next to this task (do NOT commit real secrets).
-    try:
-        from kv import base_url, api_key  # type: ignore
-
-        return str(base_url), str(api_key)
-    except Exception:
-        return None, None
-
-
-def get_default_settings() -> Dict[str, Any]:
-    """Defaults for evaluation.
-
-    NOTE: These settings are applied by the validator and are *not* overridable
-    from candidate program output.
-    """
-    return {
-        "model": FIXED_MEDGEMMA_MODEL,
-        "temperature": float(os.getenv("MEDGEMMA_TEMPERATURE", "0.0")),
-        "max_tokens": int(os.getenv("MEDGEMMA_MAX_TOKENS", "256")),
-        "resize": FIXED_IMAGE_SIZE,
-        "concurrency": int(os.getenv("MEDGEMMA_CONCURRENCY", "8")),
-        "insecure_ssl": os.getenv("MEDGEMMA_INSECURE_SSL", "0") in {"1", "true", "True"},
-        "subset_dir": os.getenv("PNEUMONIA_SUBSET_DIR") or _default_subset_dir(),
-        # Evaluate a limited number of images if requested (useful for quick debug).
-        # None means: evaluate ALL images from manifest.jsonl.
-        "num_images": _parse_optional_int(
-            os.getenv("PNEUMONIA_NUM_IMAGES")
-            or os.getenv("MEDGEMMA_NUM_IMAGES")
-            or os.getenv("NUM_IMAGES")
-        ),
-    }
-
-
-def normalize_program_output(obj: Any) -> Dict[str, Any]:
-    """
-    Normalize candidate program output to a dict:
-      - If obj is a string -> {"prompt": obj}
-      - If obj is a dict -> returned as-is (shallow copy)
-    """
+def normalize_program_output(obj: Any, *, top_k_enabled: bool | None = None, search_space: str | None = None) -> dict[str, Any]:
+    """Validate the exact search space and collapse all zero-temperature settings to greedy."""
+    if top_k_enabled is None:
+        top_k_enabled = os.getenv("PNEUMONIA_ENABLE_TOP_K", "0").lower() in ("1", "true")
+    if search_space is None:
+        search_space = os.getenv("PNEUMONIA_SEARCH_SPACE", "joint")
+    if search_space not in ("joint", "prompt-only"):
+        raise ValueError("PNEUMONIA_SEARCH_SPACE must be joint or prompt-only")
     if isinstance(obj, str):
-        return {"prompt": obj}
-    if isinstance(obj, dict):
-        return dict(obj)
-    raise TypeError(f"Program output must be str or dict, got: {type(obj)}")
+        obj = {"prompt": obj}
+    if not isinstance(obj, dict) or set(obj) - {"prompt", "sampling"}:
+        raise ValueError("Candidate must be a prompt string or an object containing only prompt and sampling")
+    prompt = obj.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Candidate prompt must be a nonempty string")
+    sampling = obj.get("sampling", {})
+    allowed = {"temperature", "top_p", "top_k"} if top_k_enabled else {"temperature", "top_p"}
+    if not isinstance(sampling, dict) or set(sampling) - allowed:
+        raise ValueError(f"Unsupported sampling keys; allowed keys: {sorted(allowed)}")
+    temperature = sampling.get("temperature", 0.0)
+    top_p = sampling.get("top_p", 1.0)
+    if type(temperature) not in (int, float) or temperature not in TEMPERATURES:
+        raise ValueError(f"temperature must be one of {TEMPERATURES}")
+    if type(top_p) not in (int, float) or top_p not in TOP_PS:
+        raise ValueError(f"top_p must be one of {TOP_PS}")
+    top_k = sampling.get("top_k", -1)
+    if type(top_k) is not int or top_k not in TOP_KS:
+        raise ValueError(f"top_k must be one of {TOP_KS}")
+    if search_space == "prompt-only" and (temperature != 0.0 or top_p != 1.0 or top_k != -1):
+        raise ValueError("prompt-only control requires temperature=0, top_p=1, and no top_k restriction")
+    canonical = {"temperature": float(temperature), "top_p": float(top_p) if temperature else 1.0}
+    if top_k_enabled and temperature:
+        canonical["top_k"] = top_k
+    return {"prompt": prompt, "sampling": canonical}
 
 
-def resize_and_pad_to_square(img: Image.Image, size: int) -> Image.Image:
-    """Resize keeping aspect ratio; pad with black to size×size."""
-    if size <= 0:
-        return img.convert("RGB")
-
-    img = img.convert("RGB")
-    w, h = img.size
-    if w == size and h == size:
-        return img
-
-    scale = min(size / w, size / h)
-    nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-    resized = img.resize((nw, nh), resample=Image.BICUBIC)
-
-    canvas = Image.new("RGB", (size, size), (0, 0, 0))
-    left = (size - nw) // 2
-    top = (size - nh) // 2
-    canvas.paste(resized, (left, top))
-    return canvas
+def candidate_id(candidate: dict[str, Any]) -> str:
+    """Hash the canonical prompt and decoder jointly for stable audit identifiers."""
+    return hashlib.sha256(json.dumps(candidate, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def pil_to_data_url(img: Image.Image, fmt: str = "PNG", jpeg_quality: int = 95) -> str:
-    """Encode PIL image as a data URL for OpenAI-compatible multimodal API."""
-    fmt = fmt.upper()
-    if fmt not in {"PNG", "JPEG", "JPG"}:
-        raise ValueError("fmt must be PNG or JPEG")
-
-    import io
-
-    bio = io.BytesIO()
-    if fmt in {"JPEG", "JPG"}:
-        img.save(bio, format="JPEG", quality=jpeg_quality, optimize=True)
-        mime = "image/jpeg"
+def load_candidate(path: str | Path) -> dict[str, Any]:
+    """Load an explicit trusted Python candidate or an exported JSON configuration."""
+    path = Path(path).resolve()
+    if path.suffix.lower() == ".json":
+        output = json.loads(path.read_text(encoding="utf-8"))
+    elif path.suffix.lower() == ".py":
+        module = runpy.run_path(str(path))
+        output = module["entrypoint"]()
     else:
-        img.save(bio, format="PNG", optimize=True)
-        mime = "image/png"
-
-    b64 = base64.b64encode(bio.getvalue()).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
+        raise ValueError("Candidate path must end in .py or .json")
+    return normalize_program_output(output)
 
 
-def extract_json(text: str) -> Dict[str, Any]:
-    """
-    Extract a single JSON object from a model response.
-    Accepts:
-      - pure JSON
-      - JSON embedded in surrounding text
-    """
-    text = (text or "").strip()
-    try:
-        val = json.loads(text)
-        if isinstance(val, dict):
-            return val
-    except Exception:
-        pass
-
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        raise ValueError("No JSON object found in model output")
-    val = json.loads(m.group(0))
-    if not isinstance(val, dict):
-        raise ValueError("Extracted JSON is not an object")
-    return val
-
-
-def _parse_label_dir_name(name: str, label_map: Dict[int, str]) -> Tuple[int, str] | None:
-    m = re.match(r"^(\d+)[_-](.+)$", name)
-    if m:
-        return int(m.group(1)), str(m.group(2)).strip()
-
-    if name.isdigit():
-        label_id = int(name)
-        return label_id, label_map.get(label_id, name)
-
-    lowered = name.strip().lower()
-    for label_id, label_name in sorted(label_map.items()):
-        if lowered == str(label_name).strip().lower():
-            return label_id, label_name
-    return None
-
-
-def _parse_original_index(filename: str, fallback: int) -> int:
-    m = re.search(r"_(\d+)_y\d+(?:\.[^.]+)?$", filename)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            pass
-    return fallback
-
-
-def _infer_split(filename: str) -> str:
-    m = re.match(r"^([A-Za-z0-9]+)_", filename)
-    if m:
-        return str(m.group(1))
-    return ""
-
-
-def load_dataset(subset_dir: str | Path) -> Tuple[List[ManifestRow], Dict[int, str]]:
-    """Load a subset by scanning class folders; manifest.jsonl is optional."""
+def load_dataset(subset_dir: str | Path, num_images: int | None = None) -> list[dict[str, Any]]:
+    """Load the frozen manifest; small smoke subsets alternate classes deterministically."""
     subset_dir = Path(subset_dir)
-    if not subset_dir.exists():
-        raise FileNotFoundError(f"subset_dir not found: {subset_dir}")
-    if not subset_dir.is_dir():
-        raise NotADirectoryError(f"subset_dir is not a directory: {subset_dir}")
-
-    label_map = PNEUMONIA_LABEL_MAP.copy()
-    label_map_path = subset_dir / "label_map.json"
-    if label_map_path.exists():
-        raw = json.loads(label_map_path.read_text(encoding="utf-8"))
-        label_map = {int(k): str(v) for k, v in raw.items()}
-
-    rows: List[ManifestRow] = []
-    next_fallback_index = 0
-
-    for child in sorted(subset_dir.iterdir(), key=lambda p: p.name):
-        if not child.is_dir():
-            continue
-
-        parsed = _parse_label_dir_name(child.name, label_map)
-        if parsed is None:
-            continue
-
-        label_id, inferred_label_name = parsed
-        label_name = label_map.get(label_id, inferred_label_name)
-        label_map[label_id] = label_name
-
-        for img_path in sorted(child.rglob("*"), key=lambda p: p.as_posix()):
-            if not img_path.is_file():
-                continue
-            if img_path.suffix.lower() not in IMAGE_SUFFIXES:
-                continue
-
-            rows.append(
-                ManifestRow(
-                    rel_path=img_path.relative_to(subset_dir).as_posix(),
-                    label_id=int(label_id),
-                    label_name=str(label_name),
-                    split=_infer_split(img_path.name),
-                    original_index=_parse_original_index(img_path.name, next_fallback_index),
-                )
-            )
-            next_fallback_index += 1
-
+    rows = [json.loads(line) for line in (subset_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     if not rows:
-        raise FileNotFoundError(
-            f"No labeled image files found in {subset_dir}. Expected class subdirectories like 00_normal and 01_pneumonia."
-        )
+        raise ValueError("Dataset manifest is empty")
+    if num_images is not None and num_images < len(rows):
+        grouped = [[row for row in rows if row["label_id"] == label] for label in LABELS]
+        rows = [group[index] for index in range(max(map(len, grouped))) for group in grouped if index < len(group)][:num_images]
+    return rows
 
-    return rows, label_map
+
+def image_data_url(path: str, expected_sha256: str | None = None) -> str:
+    """Verify each frozen source and optionally reuse its exact prepared payload across workers."""
+    data = Path(path).read_bytes()
+    actual_sha256 = hashlib.sha256(data).hexdigest()
+    if expected_sha256 is not None and actual_sha256 != expected_sha256:
+        raise ValueError(f"Frozen image SHA-256 mismatch for {Path(path).name}")
+    cache_root = os.getenv("PNEUMONIA_IMAGE_CACHE")
+    if not cache_root:
+        return _encode_image_data(data)
+    transform = {"source_sha256": actual_sha256, "format_version": 1, "resize": 896, "mode": "RGB", "resample": "BICUBIC", "pad": [0, 0, 0], "format": "PNG", "optimize": True, "pillow": pillow_version, "zlib": features.version_codec("zlib")}
+    key = hashlib.sha256(json.dumps(transform, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+    cache = Path(cache_root) / (key + ".json")
+    try:
+        record = json.loads(cache.read_text(encoding="utf-8"))
+        payload = record["payload"]
+        if record["key"] == key and isinstance(payload, str) and payload.startswith("data:image/png;base64,") and hashlib.sha256(payload.encode("ascii")).hexdigest() == record["payload_sha256"]:
+            return payload
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        pass
+    payload = _encode_image_data(data)
+    record = {"key": key, "payload_sha256": hashlib.sha256(payload.encode("ascii")).hexdigest(), "payload": payload}
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache.with_name(f".{cache.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(record, separators=(",", ":")), encoding="utf-8")
+        os.replace(temporary, cache)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return payload
 
 
-def build_prompt(label_map: Dict[int, str], extra: str = "") -> str:
-    """
-    Baseline prompt builder.
+def _encode_image_data(data: bytes) -> str:
+    """Apply the unchanged scientific image transform on a cache miss."""
+    with Image.open(io.BytesIO(data)) as source:
+        image = source.convert("RGB")
+    scale = min(896 / image.width, 896 / image.height)
+    resized = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))), resample=Image.Resampling.BICUBIC)
+    canvas = Image.new("RGB", (896, 896), (0, 0, 0))
+    canvas.paste(resized, ((896 - resized.width) // 2, (896 - resized.height) // 2))
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
-    Candidate programs are free to ignore this function and return a custom prompt,
-    but using it keeps the class schema consistent.
 
-    The output contract is strict JSON:
-      {"class_id": int, "class_name": str}
-    """
-    items = "\n".join([f"- {k}: {v}" for k, v in sorted(label_map.items())]).strip()
-    extra = (extra or "").strip()
-    if extra:
-        extra = "\n\n" + extra
+def _unique_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate JSON keys instead of silently selecting the last value."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
-    return (
-        "You are a medical image classifier. "
-        "Given a chest X-ray image, choose EXACTLY ONE class id from the list below.\n\n"
-        "Classes (id: name):\n"
-        f"{items}\n\n"
-        "Return ONLY a JSON object with keys: class_id (int), class_name (string). "
-        "No extra keys, no markdown, no explanation."
-        f"{extra}"
-    )
+
+def extract_json(text: str) -> dict[str, Any]:
+    """Extract complete JSON objects, allowing repeated identical objects but no repair."""
+    text = text.strip()
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_json_keys)
+    try:
+        obj = decoder.decode(text)
+    except json.JSONDecodeError:
+        objects = []
+        start = text.find("{")
+        while start >= 0:
+            # An invalid outer object must not expose a valid-looking nested fragment.
+            try:
+                value, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError as error:
+                unfinished = error.pos == len(text) or error.msg.startswith("Unterminated string")
+                if not objects or not unfinished:
+                    raise
+                # Preserve a complete answer already accepted by the legacy parser; never repair its tail.
+                break
+            objects.append(value)
+            start = text.find("{", end)
+        if not objects:
+            raise ValueError("No JSON object found")
+        signatures = {json.dumps(value, sort_keys=True, ensure_ascii=False) for value in objects}
+        if len(signatures) != 1:
+            raise ValueError("Conflicting JSON objects in model output")
+        obj = objects[0]
+    if not isinstance(obj, dict):
+        raise ValueError("Prediction must be a JSON object")
+    return obj
+
+
+def parse_prediction(text: str) -> dict[str, Any]:
+    """Require matching binary labels, normalizing the exact normal alias in the initial prompt."""
+    prediction = extract_json(text)
+    label = prediction.get("class_id")
+    if type(label) is not int or label not in LABELS:
+        raise ValueError("class_id must be integer 0 or 1")
+    name = prediction.get("class_name")
+    if label == 0 and name == "normal (no pneumonia)":
+        name = "normal"
+    if name != LABELS[label]:
+        raise ValueError("class_name must match class_id")
+    return {"class_id": label, "class_name": LABELS[label]}
