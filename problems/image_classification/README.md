@@ -78,7 +78,7 @@ python -B run_scripts/image_classification/run_experiment.py \
   --run-dir run_scripts/image_classification/outputs/medgemma-27b-r128-s43
 ```
 
-The matrix launcher runs 24 searches sequentially: two models × four resolutions × three seeds. Its endpoint must serve the model selected by each request. Preview the commands with `--dry-run`. Run long jobs in a detached session:
+The matrix launcher runs 24 searches sequentially: two models × four resolutions × three seeds. Its endpoint must serve the model selected by each request. Preview the commands with `--dry-run`. For server-specific model identifiers, set `--evaluator-model-4b` and `--evaluator-model-27b` on the matrix launcher. Run long jobs in a detached session:
 
 ```bash
 screen -dmS medgemma-search bash -c '
@@ -124,7 +124,7 @@ python -B run_scripts/image_classification/evaluate.py \
 
 Within a search, equal fitness is resolved by the latest stored update counter, then program identifier. Across searches, equal train fitness is resolved by the lower search seed. The command above performs a new test evaluation. Use `--skip-final-evaluation` on the original search commands if only the cross-search pair is needed.
 
-To evaluate one exported candidate directly, use `evaluate.py --candidate PATH --model 4b --resolution 128 --split test --repeats 3 --run-dir OUTPUT` with the corresponding endpoint options.
+To evaluate one exported candidate directly, use `python -B run_scripts/image_classification/evaluate.py --candidate PATH --model 4b --resolution 128 --split test --repeats 3 --run-dir OUTPUT` with the corresponding endpoint options.
 
 Aggregate the individual search results without additional inference:
 

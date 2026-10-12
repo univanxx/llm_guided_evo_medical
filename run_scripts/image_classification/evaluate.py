@@ -1,6 +1,8 @@
 """Evaluate a previously selected candidate through the same monitored gateway as evolution.
 
-Example: python evaluate.py --candidate runs/example/best_candidate.json --model 4b --resolution 28
+Example from the repository root:
+python -B run_scripts/image_classification/evaluate.py --candidate CANDIDATE.json --model 4b --resolution 28 --run-dir OUTPUT
+Add the evaluator endpoint options used for the source experiment.
 Additional options are passed to run_experiment.py. A single candidate is evaluated
 directly; repeated --evolution-run selects initial and descendant winners on train,
 then evaluates both on test with --final-repeats and --final-max-images.
