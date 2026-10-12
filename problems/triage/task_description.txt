@@ -55,3 +55,9 @@ MODEL ACCESS
 
 Programs may use one-shot prompting, structured multi-stage reasoning, voting,
 retrieval, or hybrids as long as they return valid ESI outputs.
+
+All model calls must go through the APIs exposed by `helper.py`. Do not create
+new OpenAI-compatible clients and do not hardcode model names, provider URLs,
+or API credentials inside candidate programs. The experiment runner controls
+the expert model centrally through `helper.py` so that every candidate is
+evaluated with the same model and its token usage is recorded consistently.
