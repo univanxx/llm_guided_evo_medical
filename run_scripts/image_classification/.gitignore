@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+outputs/
+.cache/
+requirements-resolved.txt
+*.log
+credentials*
+*.key
+*.pem

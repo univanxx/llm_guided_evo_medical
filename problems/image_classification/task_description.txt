@@ -1,118 +1,69 @@
-TASK DEFINITION – MEDGEMMA PNEUMONIAMNIST (BINARY CHEST X-RAY CLASSIFICATION) – v6
+TASK: JOINT PROMPT AND DECODING OPTIMIZATION FOR PNEUMONIAMNIST
 
-Goal
-----
-Maximize classification accuracy of a medical VLM (MedGemma) on a fixed local subset of PneumoniaMNIST.
+Maximize accuracy of one fixed medical VLM on the frozen 100-image training subset.
+The experiment selects either MedGemma 1.5 4B or MedGemma 27B and one original
+resolution (28, 64, 128, or 224) before the run. These are eight separate conditions
+implemented by this one task. The held-out 624-image test set is never used by
+the evolutionary validator or for selecting the winning candidate.
 
-Dataset
--------
-- Local folder: data/pneumoniamnist_subset/
-- Size: depends on your local subset folder (default zip contains 40 images total)
-- Source format: PNG chest X-rays (grayscale converted to RGB for API)
-- Class schema:
-    0 -> normal
-    1 -> pneumonia
-
-What is “pneumonia” (for prompt engineering)
---------------------------------------------
-Pneumonia is an infection/inflammation of lung parenchyma. On chest X-ray it commonly presents as:
-- focal or lobar airspace opacity / consolidation
-- patchy infiltrates or interstitial opacities
-- air bronchograms
-- sometimes pleural effusion or volume loss (may be confounded with atelectasis)
-
-Confounders and pitfalls: atelectasis, pulmonary edema, ARDS, motion/underexposure, rotated views, medical devices.
-
-Objective / Fitness
+Candidate interface
 -------------------
-- Primary metric: accuracy (fitness) on the subset.
-- The validator also reports JSON parse_success_rate and confusion matrix.
-
-Candidate Program Interface
----------------------------
-Each candidate program should define:
+Define a Python function with no arguments named entrypoint. Return a dictionary:
 
     def entrypoint():
-        return PROMPT
+        """Return the medical instruction and its decoder settings."""
+        return {"prompt": PROMPT, "sampling": {"temperature": 0.3, "top_p": 0.9}}
 
-where PROMPT is a single string instruction to the model.
+You may mutate both the prompt string and the allowed sampling values:
+- temperature: exactly 0, 0.1, 0.3, or 0.6.
+- top_p: exactly 0.9 or 1.0.
+- Zero temperature is canonical greedy decoding with top_p=1.
+- top_k is disabled by default. Include it ONLY if the experiment explicitly
+  states top_k support is enabled; its allowed values are -1, 20, and 50.
+- In prompt-only control runs sampling must remain exactly temperature=0 and
+  top_p=1, without a top_k restriction. Changes are rejected even at temperature=0.
+- A legacy string return value is accepted with canonical greedy settings.
 
-Candidate programs should return ONLY a prompt string.
+No other output fields or sampling keys are allowed. Do not import files, inspect
+data or labels, change environment variables, use network calls, or change the
+validator. The candidate describes one instruction and one decoder configuration
+shared by every image; it does not classify images itself.
 
-IMPORTANT (anti-cheating)
--------------------------
-The evaluator uses a fixed VLM + fixed image preprocessing (see helper.py):
-  - model: Google/Medgemma-1.5-4b-it
-  - image normalization: resize+pad to 896×896
-Evolved programs cannot change these values.
-
-Runtime knobs (via env)
------------------------
-- MEDGEMMA_MODEL: override model (debug only; default is fixed)
-- MEDGEMMA_IMAGE_SIZE (or MEDGEMMA_RESIZE): override image size (debug only; default 896)
-- PNEUMONIA_NUM_IMAGES / MEDGEMMA_NUM_IMAGES: evaluate only first N images from manifest (default: all)
-
-Validator / Runtime
--------------------
-- validate.py loads the subset via manifest.jsonl, calls MedGemma via OpenAI-compatible chat.completions,
-  parses strict JSON predictions, and computes accuracy.
-- Images are resized+letterboxed to 896×896.
-
-Credentials
------------
-Provide either:
-- env vars: MEDGEMMA_BASE_URL and MEDGEMMA_API_KEY
-or
-- kv.py next to helper.py with variables base_url and api_key.
-
-Prompt evolution ideas (high signal)
+Fixed procedure and prediction format
 ------------------------------------
-1) Strict output contract:
-   - enforce: JSON only, exactly keys {class_id, class_name}, choose ONE of {0,1}.
-   - add self-check: if not sure, still pick the most likely class, never output “unknown”.
+The evaluator converts each original image to RGB, resizes with bicubic sampling,
+and pads with black to 896 by 896. Exactly one model request is made per image
+per evaluation repeat. The response length is fixed at 256 tokens. Model identity,
+data, evaluation repeat count, seed schedule, and networking are controlled by
+the researcher, never by the candidate. Seeds are used only when the backend
+has been explicitly configured to support them.
 
-2) Radiology checklist:
-   - systematically scan lung fields for focal airspace opacities, lobar consolidation,
-     interstitial patterns, air bronchograms; check pleura for effusion; compare sides.
+Ask the model to return a JSON object with these values:
+  {"class_id": 0, "class_name": "normal"}
+or
+  {"class_id": 1, "class_name": "pneumonia"}
 
-3) Decision thresholding:
-   - bias toward “normal” unless clear airspace disease is present (reduces false positives),
-     or the opposite if dataset is pneumonia-heavy (experiment).
+class_id must be an integer and class_name must match it. Invalid answers count
+as wrong predictions. The exact name "normal (no pneumonia)" is normalized to
+"normal" only for class_id=0. The evaluator tolerates surrounding text and repeated
+identical complete JSON objects; conflicting complete answers or incomplete-only
+JSON fail. An existing complete answer is retained if followed by an incomplete
+tail; the tail is not repaired or treated as valid JSON.
+JSON-only instructions are recommended.
+Infrastructure errors abort the evaluation; they do not become poor fitness.
 
-4) Error reduction:
-   - add “do not include markdown”, “do not explain”, “do not output multiple JSON objects”.
-   - add “if you output anything besides JSON, the answer is invalid”.
+Fitness and search guidance
+---------------------------
+Fitness is accuracy across all training images. Repeated training passes, when
+configured, are averaged without voting on model responses. parse_success_rate
+is also reported. Sampling can increase evaluation noise and may not improve
+accuracy; zero temperature remains an admissible solution.
 
-5) Calibration / deliberation:
-   - instruct the model to reason silently (no CoT in output) and then output JSON.
-   - request a brief internal checklist (not printed) before answering.
+Pneumonia cues include focal/lobar airspace opacity, patchy infiltrates,
+consolidation, and air bronchograms. Confounders include atelectasis, edema,
+rotation, exposure artifacts, and motion. These are prompts for a research
+classification benchmark, not deployment instructions for clinical decisions.
 
-6) Domain constraints:
-   - remind that images are pediatric AP/PA-style CXRs (often in PneumoniaMNIST-derived datasets).
-   - mention typical pneumonia patterns in pediatrics (perihilar, patchy, lobar).
-
-Files
------
-- helper.py           : shared helpers (I/O, preprocessing, parsing, defaults)
-- validate.py         : EV validator computing fitness
-- metrics.yaml        : metric specs (fitness = accuracy)
-- initial_programs/   : starting prompt programs
-- data/               : dataset subset used by the validator
-Version 6 notes
----------------
-- The EV return contract is strictly Dict[str, float]. Any debug info is written to files:
-    * <subset_dir>/predictions_latest.jsonl
-    * <subset_dir>/metrics_latest.json
-    * <subset_dir>/last_validator_error.txt
-- If a model response is not valid JSON, that example is counted as WRONG (it contributes to denominator).
-- Credentials are loaded from:
-    * MEDGEMMA_BASE_URL / MEDGEMMA_API_KEY, or
-    * OPENAI_BASE_URL / OPENAI_API_BASE + OPENAI_API_KEY, or
-    * kv.py next to this task.
-  Always export OPENAI_BASE_URL+OPENAI_API_KEY explicitly, because the validator
-  runs in a separate process and may not see Hydra LLM config objects.
-
-- New in v6:
-  * Fixed model: Google/Medgemma-1.5-4b-it (not overridable by programs)
-  * Fixed image normalization: 896×896 resize+pad (not overridable by programs)
-  * Optional env to evaluate only first N images: PNEUMONIA_NUM_IMAGES / MEDGEMMA_NUM_IMAGES
+The ten original starting prompts are preserved, initially with greedy decoding.
+The joint candidate is saved as JSON so that final evaluation applies the same
+prompt, sampling parameters, preprocessing, output parser, and scoring rules.
